@@ -1,0 +1,23 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+  - name: install packages
+    pacman:
+      name: "{{ item }}"
+      state: present
+    with_items:
+    - "gptfdisk"
+    - "parted"
+  - name: create folder
+    file:
+      path: "/usr/local/bin"
+      state: directory
+  - name: copy files
+    copy:
+      src: "./{{ item }}"
+      dest: "/usr/local/bin/{{ item }}"
+      mode: u=rwx,g=rx,o=x
+    with_items:
+    - "init-mdadm-ext3-raid1"
+    - "init-btrfs-raid1"

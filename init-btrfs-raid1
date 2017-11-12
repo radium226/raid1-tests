@@ -1,0 +1,122 @@
+#!/bin/bash
+
+set -e
+
+yellow()
+{
+  echo -en "\e[33m${1}\e[39m"
+}
+
+# https://suntong.github.io/blogs/2015/12/26/creating-gpt-partitions-easily-on-the-command-line/
+partition_drive()
+{
+  declare device="${1}"
+  declare index="${2}"
+  sgdisk -Z "${device}"
+  sgdisk -n "0:0:0" -t "0:FD00" -c 0:"DATA_$( printf "%02d" ${index} )" "${device}"
+  sleep 1
+  partprobe
+}
+
+count_drive_partitions()
+{
+  declare device="${1}"
+  grep -c "$( basename "${device}" )[0-9]" "/proc/partitions"
+}
+
+if mountpoint -q "/mnt/DATA"; then
+  echo " ==> $( yellow "Unmounting /mnt/DATA moutpoint" )"
+  umount "/mnt/DATA"
+  sleep 1 ; echo
+fi
+
+declare strategy="${1}" ; shift
+case "${strategy}" in
+  "--without-existing-files")
+      declare first_drive="${1}"
+      declare second_drive="${2}"
+
+      echo " ==> $( yellow "Partitionning ${first_drive} drive" )"
+      partition_drive "${first_drive}" 1
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Partitionning ${second_drive} drive" )"
+      partition_drive "${second_drive}" 2
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Making btrfs filesystem labeled DATA on both ${first_drive}1 and ${second_drive}1 partitions" )"
+      mkfs.btrfs -L "DATA" -f -m "raid1" -d "raid1" "${first_drive}1" "${second_drive}1"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Mounting DATA partition on /mnt/DATA" )"
+      mkdir -p "/mnt/DATA"
+      mount "/dev/disk/by-label/DATA" "/mnt/DATA"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Display /mnt/DATA btrfs filesystem info" )"
+      btrfs filesystem show "/mnt/DATA"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Writing random files in /mnt/DATA" )"
+      echo "42" | tee -a "/mnt/DATA/random.txt" >"/dev/null"
+      sleep 1
+      find "/mnt/DATA" -type "f" -print0 | xargs -0 -I {} sh -c 'echo -en "${0}: " ; cat "${0}"' '{}'
+    ;;
+
+  "--with-existing-files")
+      declare existing_partition="${1}"
+      declare new_drive="${2}"
+
+      echo " ==> $( yellow "Partitionning ${new_drive} drive" )"
+      partition_drive "${new_drive}" 1
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Making btrfs filesystem labeled DATA on ${new_drive}1 partition" )"
+      mkfs.btrfs -L "DATA" -f "${new_drive}1"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Mounting DATA partition to /mnt/DATA" )"
+      mkdir -p "/mnt/DATA"
+      sleep 1
+      mount "/dev/disk/by-label/DATA" "/mnt/DATA"
+      sleep 1 ; echo
+
+      if ! mountpoint -q "/mnt/RANDOM_FILES"; then
+        echo " ==> $( yellow "Mounting RANDOM_FILES partition to /mnt/RANDOM_FILES" )"
+        mkdir -p "/mnt/RANDOM_FILES"
+        sleep 1
+        mount "/dev/disk/by-label/RANDOM_FILES" "/mnt/RANDOM_FILES"
+        sleep 1 ; echo
+      fi
+
+
+      echo " ==> $( yellow "Copying files from /mnt/RANDOM_FILES to /mnt/DATA" )"
+      cp -r "/mnt/RANDOM_FILES" "/mnt/DATA"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Unmounting /mnt/RANDOM_FILES mountpoint" )"
+      umount "/mnt/RANDOM_FILES"
+      sleep 1 ; echo
+
+      declare existing_drive="$( readlink -f "${existing_partition}" | sed 's,^\(.*\)[0-9],\1,g' )"
+      echo " ==> $( yellow "Partitionning ${existing_drive} drive" )"
+      partition_drive "${existing_drive}" 1
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Adding ${existing_drive}1 partition to /mnt/DATA btrfs mountpoint" )"
+      btrfs device add -f "${existing_drive}1" "/mnt/DATA"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Display /mnt/DATA btrfs filesystem info" )"
+      btrfs filesystem show "/mnt/DATA"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Balacing /mnt/DATA btrfs mountpoint" )"
+      btrfs balance start -mconvert=raid1 -dconvert=raid1 "/mnt/DATA"
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Display /mnt/DATA btrfs filesystem info" )"
+      btrfs filesystem show "/mnt/DATA"
+      sleep 1 ; echo
+    ;;
+esac

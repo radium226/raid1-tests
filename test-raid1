@@ -1,0 +1,192 @@
+#!/bin/bash
+
+set -e
+
+export VM_NAME_PREFIX="$( basename "$( pwd )" )"
+
+yellow()
+{
+  echo -en "\e[33m${1}\e[39m"
+}
+
+vm_uuid()
+{
+  VBoxManage list runningvms | \
+    grep "${VM_NAME_PREFIX}" | \
+    sed 's,".*" {\(.*\)},\1,g'
+}
+
+is_drive_plugged()
+{
+  declare index="${1}"
+  VBoxManage showvminfo "$( vm_uuid )" | grep -q "./drive-$( printf "%02d" ${index} ).vdi"
+}
+
+plug_drive()
+{
+  declare index=${1}
+  VBoxManage storageattach "$( vm_uuid )" \
+    --storagectl "USB Controller" \
+    --port=${index} \
+    --type="hdd" \
+    --medium "./drive-$( printf "%02d" ${index} ).vdi"
+}
+
+unplug_drive()
+{
+  declare index=${1}
+  VBoxManage storageattach "$( vm_uuid )" \
+    --storagectl "USB Controller" \
+    --port=${index} \
+    --medium="none"
+}
+
+create_drive()
+{
+  declare index="${1}"
+  VBoxManage createmedium disk \
+    --filename="./drive-$( printf "%02d" ${index} ).vdi" \
+    --size="128" \
+    --format="VDI"
+}
+
+start_vm()
+{
+  vagrant up --provision
+}
+
+stop_vm()
+{
+  vagrant destroy --force
+}
+
+init_mdadm_ext3_raid1_without_existing_data()
+{
+  vagrant <<EOSSH ssh
+hostname
+ls -alrt /usr/local/bin
+sudo /usr/local/bin/init-mdadm-ext3-raid1 --without-existing-files "/dev/sdb" "/dev/sdc"
+EOSSH
+}
+
+init_btrfs_raid1_without_existing_data()
+{
+  vagrant <<EOSSH ssh
+hostname
+ls -alrt /usr/local/bin
+sudo /usr/local/bin/init-btrfs-raid1 --without-existing-files "/dev/sdb" "/dev/sdc"
+EOSSH
+}
+
+init_mdadm_ext3_raid1_with_existing_data()
+{
+  vagrant <<EOSSH ssh
+hostname
+ls -alrt /usr/local/bin
+sudo /usr/local/bin/init-mdadm-ext3-raid1 --with-existing-files "/dev/disk/by-label/RANDOM_FILES" "/dev/sdc"
+EOSSH
+}
+
+init_btrfs_raid1_with_existing_data()
+{
+  vagrant <<EOSSH ssh
+hostname
+ls -alrt /usr/local/bin
+sudo /usr/local/bin/init-btrfs-raid1 --with-existing-files "/dev/disk/by-label/RANDOM_FILES" "/dev/sdc"
+EOSSH
+}
+
+write_random_files() {
+vagrant <<EOSSH ssh
+set -e
+
+if [[ ! -b "/dev/disk/by-label/RANDOM_FILES" ]]; then
+  echo " ==> $( yellow "Preparing the /dev/sdb disk" )"
+  sudo sgdisk -Z "/dev/sdb"
+  sudo sgdisk -n "0:0:0" -t "0:8300" -c 0:"RANDOM_FILES" "/dev/sdb"
+  sleep 1
+  partprobe
+  sleep 1 ; echo
+
+  echo " ==> $( yellow "Creating the RANDOM_FILES partition" )"
+  sudo mkfs.ext3 "/dev/sdb1" -L "RANDOM_FILES"
+  sleep 1
+  partprobe
+  sleep 1 ; echo
+
+  echo " ==> $( yellow "Mounting the RANDOM_FILES partition to /mnt/RANDOM_FILES" )"
+  sudo mkdir -p "/mnt/RANDOM_FILES"
+  sudo mount "/dev/disk/by-label/RANDOM_FILES" "/mnt/RANDOM_FILES"
+  sleep 1 ; echo
+
+  echo " ==> $( yellow "Writing random files" )"
+  echo "42" | sudo tee -a "/mnt/RANDOM_FILES/random_file.txt"
+else
+  echo "The RANDOM_FILES partition already exists! "
+fi
+EOSSH
+}
+
+declare action="${1:-"init"}" ; shift
+case "${action}" in
+  "plug-drive")
+      declare index="${1}" ; shift
+      plug_drive ${index}
+    ;;
+
+  "unplug-drive")
+      declare index="${1}" ; shift
+      unplug_drive ${index}
+    ;;
+
+  "init")
+      declare file_system="${1}" ; shift
+
+      start_vm
+      sleep 1
+
+      # We create the drives if needed
+      declare suffix=
+      for index in $( seq 1 2 ); do
+        test -f "./drive-$( printf "%02d" ${index} ).vdi" || create_drive ${index}
+      done
+
+      # Let's plug them
+      is_drive_plugged 1 || plug_drive 1
+      sleep 1
+      is_drive_plugged 2 || plug_drive 2
+      sleep $(( 1 + 5 ))
+
+      case "${file_system}" in
+        "mdadm-ext3")
+            declare strategy="${1}" ; shift
+            case "${strategy}" in
+              "--without-existing-files")
+                  # Init drives
+                  init_mdadm_ext3_raid1_without_existing_data
+                ;;
+
+              "--with-existing-files")
+                  write_random_files
+                  init_mdadm_ext3_raid1_with_existing_data
+                ;;
+            esac
+          ;;
+
+          "btrfs")
+              declare strategy="${1}" ; shift
+              case "${strategy}" in
+                "--without-existing-files")
+                    # Init drives
+                    init_btrfs_raid1_without_existing_data
+                  ;;
+
+                "--with-existing-files")
+                    write_random_files
+                    init_btrfs_raid1_with_existing_data
+                  ;;
+              esac
+            ;;
+      esac
+    ;;
+esac

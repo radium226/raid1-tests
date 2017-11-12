@@ -1,0 +1,123 @@
+#!/bin/bash
+
+set -e
+
+yellow()
+{
+  echo -en "\e[33m${1}\e[39m"
+}
+
+# https://suntong.github.io/blogs/2015/12/26/creating-gpt-partitions-easily-on-the-command-line/
+partition_drive()
+{
+  declare device="${1}"
+  declare index="${2}"
+  sgdisk -Z "${device}"
+  sgdisk -n "0:0:0" -t "0:FD00" -c 0:"DATA_$( printf "%02d" ${index} )" "${device}"
+  sleep 1
+  partprobe
+}
+
+count_drive_partitions()
+{
+  declare device="${1}"
+  grep -c "$( basename "${device}" )[0-9]" "/proc/partitions"
+}
+
+declare strategy="${1}" ; shift
+case "${strategy}" in
+  "--without-existing-files")
+      declare device_01="${1}"
+      declare device_02="${2}"
+
+      echo " ==> $( yellow "Partitionning on ${device_01}" )"
+      test $( count_drive_partitions "${device_01}" ) -eq 0 && partition_drive "${device_01}" 1
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Partitionning on ${device_02}" )"
+      test $( count_drive_partitions "${device_02}" ) -eq 0 && partition_drive "${device_02}" 2
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Creating RADI1 array /dev/md/DATA" )"
+      echo "yes" | mdadm \
+        --create \
+        --verbose "/dev/md/DATA" \
+        --level="1" \
+        --raid-devices="2" \
+        --name="DATA" \
+        "${device_01}1" "${device_02}1"
+      sleep 1
+      mdadm --wait "/dev/md/DATA"
+      sleep 1 ; echo
+
+        echo " ==> $( yellow "Making ext3 filesystem to /dev/md/DATA labeled DATA" )"
+      mkfs.ext3 "/dev/md/DATA" -L "DATA"
+      sleep 1
+      partprobe
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Mouting DATA partition to /mnt/DATA" )"
+      mkdir -p "/mnt/DATA"
+      mount "/dev/disk/by-label/DATA" "/mnt/DATA"
+    ;;
+    
+  "--with-existing-files")
+      declare existing_partition="${1}"
+      declare new_drive="${2}"
+      
+      echo " ==> $( yellow "Partitioning ${new_drive}" )"
+      partition_drive "${new_drive}" 1
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Creating RAID1 on ${new_drive} with missing other drive" )"
+      echo "yes" | mdadm \
+        --create \
+        --verbose "/dev/md/DATA" \
+        --level="1" \
+        --raid-devices="2" \
+        --name="DATA" \
+        "missing" "${new_drive}1"
+      mdadm --wait "/dev/md/DATA" || true
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Making ext3 filesystem labeled DATA on /dev/md/DATA" )"
+      mkfs.ext3 "/dev/md/DATA" -L "DATA"
+      sleep 1
+      partprobe
+      sleep 1 ; echo
+
+      echo " ==> $( yellow "Mounting /dev/disk/by-label/DATA on /mnt/DATA" )"
+      mkdir -p "/mnt/DATA"
+      mount "/dev/disk/by-label/DATA" "/mnt/DATA"
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Copying all files from /mnt/REMOTE_FILES" )"
+      cp -R "/mnt/RANDOM_FILES" "/mnt/DATA"
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Unmounting /mnt/REMOTE_FILES" )"
+      umount "/mnt/RANDOM_FILES"
+      sleep 1 ; echo
+      
+      declare existing_drive="$( readlink -f "${existing_partition}" | sed 's,^\(.*\)[0-9],\1,g' )"
+      echo " ==> $( yellow "Partitioning ${existing_drive}" )"
+      partition_drive "${existing_drive}" 2
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Unmounting /mnt/DATA" )"
+      umount "/mnt/DATA"
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Adding ${existing_drive}1 to /dev/md/DATA" )"
+      mdadm "/dev/md/DATA" --add "${existing_drive}1"
+      mdadm --wait "/dev/md/DATA" || true
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Mounting /dev/md/DATA to /mnt/DATA" )"
+      mount "/dev/md/DATA" "/mnt/DATA"
+      sleep 1 ; echo
+      
+      echo " ==> $( yellow "Check files" )"
+      find "/mnt/DATA" -type "f" -print0 | xargs -0 -I {} sh -c 'echo -en "${0}: " ; cat "${0}"' '{}'   
+    ;;
+esac
